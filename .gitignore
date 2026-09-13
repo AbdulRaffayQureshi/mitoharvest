@@ -1,0 +1,6 @@
+.venv/
+.env
+*.fasta
+*.csv
+*.log
+__pycache__/

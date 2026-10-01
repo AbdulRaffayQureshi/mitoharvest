@@ -3,4 +3,9 @@
 *.fasta
 *.csv
 *.log
+*.txt
+!requirements.txt
 __pycache__/
+jbwa-data/
+cache/
+.vscode/

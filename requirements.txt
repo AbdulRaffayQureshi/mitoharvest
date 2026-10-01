@@ -1,2 +1,4 @@
 biopython>=1.83
 python-dotenv>=1.0
+numpy
+pandas

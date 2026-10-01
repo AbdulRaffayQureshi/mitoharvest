@@ -22,6 +22,14 @@ graph TD
     I --> J["Align to rCRS<br>MAFFT, or Biopython pairwise fallback"]
     J --> K["Write CSV + FASTA row<br>flushed + fsynced immediately"]
     K --> L["Log line written<br>flushed + fsynced immediately"]
+    L --> M["main() loop complete"]
+    M --> N["run_downstream_analysis() begins"]
+    N --> O["Step 1: Strip alignment gaps (-)<br>write raw_for_haplogrep.fasta"]
+    O --> P["Step 2: Call native HaploGrep3 CLI<br>classify, tree=phylotree-rcrs@17.2"]
+    P --> Q["Step 3: Write per-sample calls<br>haplogroups.txt"]
+    Q --> R["Step 4: Launch popgen_analysis.py<br>as subprocess"]
+    R --> S["Step 5: Parse haplogroups.txt<br>compute H, Hd, Pi, Theta_W, Tajima's D"]
+    S --> T["Step 6: Export cohort metrics<br>popgen_summary.csv"]
 ```
 
 Nothing is batched to the end of the run — every accepted record hits disk (CSV, FASTA, and log) the moment it's processed, so an interrupted run still leaves you with everything fetched so far, and the next run picks up exactly where it left off.
@@ -41,6 +49,18 @@ Nothing is batched to the end of the run — every accepted record hits disk (CS
 | `align.py` | Aligns each QC-passed sequence to the rCRS reference. Uses MAFFT (`--keeplength --add`) if it's on `PATH` — resolved via `shutil.which` and invoked at its *resolved* path, so it works whether that's `mafft` on Linux/macOS or `mafft.bat` on Windows. Falls back automatically to Biopython's `PairwiseAligner` if MAFFT isn't installed. |
 | `export.py` | `ResultWriter` writes one CSV row and one FASTA entry per accepted record, flushing and `fsync`ing both after every write. `load_checkpoint()` reads an existing CSV back in on startup to rebuild the set of already-processed accessions, already-seen sequence hashes, and the running count, so a rerun resumes rather than restarts. |
 | `main.py` | Orchestrates the whole run: load checkpoint → fetch rCRS → search remaining → fetch/tag → skip-if-checkpointed → QC → MD5-hash dedup → PubMed title lookup (cached per PMID) → align → write → log. Wrapped in try/except/finally so a crash mid-run still closes files cleanly and reports partial, resumable results instead of losing everything. |
+
+---
+
+## 🔄 Getting the Latest Pipeline Updates
+
+Already have the repo cloned? Pull the latest changes before running anything:
+
+```bash
+git pull origin main
+```
+
+If this is your first time on the project, skip ahead to **Setup & Installation** below instead — you'll clone fresh rather than pull.
 
 ---
 
@@ -102,6 +122,20 @@ Add `~/.local/bin` to your shell's `PATH` afterward — via `~/.bashrc` if you u
 
 **MAFFT is easiest here** — a single `apt`/`brew` install versus manually downloading and pathing a zip on Windows — so if alignment speed matters to you and you have the option, running the pipeline from WSL or native Linux/macOS is the path of least resistance.
 
+### Installing HaploGrep3 (required — WSL/Linux)
+
+Unlike MAFFT, this one isn't optional — the pipeline's downstream haplogroup-annotation step depends on it. HaploGrep3 ships as a standalone Linux binary with no pip/conda package, so every team member needs to install it once into their own WSL (or native Linux) home directory:
+
+```bash
+cd ~
+curl -L -o haplogrep3.zip https://github.com/genepi/haplogrep3/releases/download/v3.2.2/haplogrep3-3.2.2-linux.zip
+mkdir -p ~/haplogrep3
+unzip -o haplogrep3.zip -d ~/haplogrep3
+chmod +x ~/haplogrep3/haplogrep3
+```
+
+The pipeline expects it at exactly this path (`~/haplogrep3/haplogrep3`) — if you install it elsewhere, you'll need to update the path in `main.py`'s `run_downstream_analysis()`. This step only works on Linux/WSL/macOS; HaploGrep3's Windows build doesn't support FASTA input, which is why this whole pipeline is meant to be run from WSL rather than plain PowerShell.
+
 ---
 
 ## 📦 Dependencies (`requirements.txt`)
@@ -109,20 +143,29 @@ Add `~/.local/bin` to your shell's `PATH` afterward — via `~/.bashrc` if you u
 ```
 biopython>=1.83
 python-dotenv>=1.0
+pandas>=2.0
+numpy>=1.26
 ```
 
-That's the complete list — `biopython` covers Entrez, `SeqIO`, and the pairwise aligner; `python-dotenv` loads your `.env`. Everything else the code uses (`csv`, `hashlib`, `logging`, `os`, `io`, `subprocess`, `shutil`, `tempfile`, `http.client`, `socket`) is Python's standard library, so nothing else to install. Anyone cloning the repo gets every dependency with the single command already shown above:
+`biopython` covers Entrez, `SeqIO`, and the pairwise aligner. `python-dotenv` loads your `.env`. `pandas`/`numpy` power the population-genetics summary step (`popgen_analysis.py`). Everything else the code uses (`csv`, `hashlib`, `logging`, `os`, `io`, `subprocess`, `shutil`, `tempfile`, `http.client`, `socket`) is Python's standard library, so nothing else to install. Anyone cloning the repo gets every dependency with the single command already shown above:
 
 ```bash
 uv pip install -r requirements.txt
 ```
 
-MAFFT is deliberately *not* in this file since it isn't a Python package — see the OS-specific install steps above.
+MAFFT and HaploGrep3 are deliberately *not* in this file — neither is a Python package. See the OS-specific install steps above for MAFFT, and the HaploGrep3 section above for that.
 
 ---
 
 ## 🔑 Environment Configuration (`.env`)
 
+The repository includes a template file named `.env.example`. Before running the pipeline for the first time, copy or rename it to `.env` and add your specific credentials/API keys:
+
+```bash
+#Insert this command into terminal or manually do it.
+
+cp .env.example .env   
+```
 ```ini
 NCBI_EMAIL=your.name@example.com
 NCBI_API_KEY=your_personal_ncbi_api_key
@@ -186,6 +229,42 @@ SEARCH_QUERY = (
 
 This guarantees every match names a region, but shrinks the candidate pool drastically — most GenBank submissions don't mention one at all. Check `esearch`'s `Count` for your query before committing to a full-size run with this approach.
 
+### Example: retargeting to Sri Lanka
+
+1. Swap the region list for the target country's subdivisions:
+   ```python
+   SRI_LANKA_REGIONS = [
+       "Colombo", "Gampaha", "Kandy", "Jaffna", "Galle",
+       "Matara", "Kurunegala", "Anuradhapura", "Batticaloa", "Trincomalee",
+   ]
+   ```
+2. Update `SEARCH_QUERY`'s country tag:
+   ```python
+   SEARCH_QUERY = (
+       '"Homo sapiens"[Organism] AND '
+       'mitochondrion[Filter] AND '
+       'complete genome[Title] AND '
+       '"Sri Lanka"[Country]'
+   )
+   ```
+3. Rename the output paths so runs for different countries never collide:
+   ```python
+   OUTPUT_CSV = WORKDIR / "mitovarsitypak_srilanka.csv"
+   OUTPUT_FASTA = WORKDIR / "mitovarsitypak_srilanka.fasta"
+   OUTPUT_RAW_FASTA = WORKDIR / "mitovarsitypak_srilanka_raw.fasta"
+   ```
+   `OUTPUT_CSV`/`OUTPUT_FASTA` are the two you need to rename — `OUTPUT_RAW_FASTA` isn't strictly required, but leaving it as `..._india_raw.fasta` while everything else says "srilanka" is confusing for whoever reads the output folder next, so rename all three together.
+
+4. Update the `tag_region` function in `fetch.py` to use your new config variable and fallback string:
+   ```python
+   def tag_region(text: str):
+       for region in config.SRI_LANKA_REGIONS:
+           if re.search(rf"\b{re.escape(region)}\b", text, re.IGNORECASE):
+               return region
+       return "Sri Lanka (unspecified)"
+
+Same pattern applies to any country — swap the region list, the `[Country]` tag, and the three output filenames.
+
 Other tunables worth knowing about in `config.py`:
 - `TARGET_COUNT` — how many QC-passed, deduplicated genomes to collect in total (not per run — see checkpointing)
 - `MIN_LENGTH` / `MAX_LENGTH` — currently 16500–16700 bp
@@ -208,15 +287,22 @@ If `main.py` crashes, is interrupted, or you simply stop it, your progress isn't
 
 ## ▶️ Execution & Outputs
 
+One command runs the entire pipeline end to end — NCBI fetch, QC, dedup, rCRS alignment, HaploGrep3 haplogroup calling, and the population-genetics summary, all automatically, no manual steps in between:
+
 ```bash
 uv run python main.py
 ```
+
+Under the hood: `main()` handles fetch → QC → dedup → align → write, then `run_downstream_analysis()` takes over — stripping alignment gaps into a HaploGrep3-ready FASTA, calling the local HaploGrep3 binary for per-sample haplogroup calls, and finally running `popgen_analysis.py` to produce the cohort-level summary statistics.
 
 | Output File | Description |
 |---|---|
 | `mitovarsitypak_india.fasta` | One FASTA entry per accepted record, aligned to rCRS. |
 | `mitovarsitypak_india.csv` | `accession, region, length, pubmed_id, pubmed_title, raw_sequence, aligned_sequence, description` for every accepted record. |
 | `pipeline.log` | Full audit trail — every acceptance, every QC rejection, every duplicate/checkpoint skip, PubMed lookups, and any crash traceback, each with a timestamp, updated live as the run progresses. |
+| `raw_for_haplogrep.fasta` | Gap-stripped version of the aligned FASTA, generated automatically as HaploGrep3's input. Safe to ignore unless debugging a HaploGrep3 issue. |
+| `haplogroups.txt` | Raw per-sample HaploGrep3 output — sample ID, called haplogroup, and quality score for each accession. Not currently merged back into the main CSV. |
+| `popgen_summary.csv` | Cohort-level population genetics statistics (segregating sites, haplotype diversity, nucleotide diversity, Tajima's D) plus a major-haplogroup breakdown, generated by `popgen_analysis.py`. |
 
 ---
 

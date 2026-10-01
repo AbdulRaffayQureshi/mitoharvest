@@ -1,6 +1,9 @@
 import io
+import sys
 import logging
+import subprocess
 import traceback
+from pathlib import Path
 from Bio import SeqIO
 
 import config
@@ -108,9 +111,50 @@ def main():
             log.info(f"  {region}: {count}")
 
 
+def run_downstream_analysis():
+    # Directly read the standard aligned FASTA from config
+    source = config.OUTPUT_FASTA
+    raw_for_haplogrep = config.WORKDIR / "raw_for_haplogrep.fasta"
+
+    # Python equivalent of your `sed` bash command
+    with open(source) as f:
+        lines = f.readlines()
+
+    with open(raw_for_haplogrep, "w") as out:
+        for line in lines:
+            out.write(line if line.startswith(">") else line.replace("-", ""))
+
+    haplogrep_bin = Path.home() / "haplogrep3" / "haplogrep3"
+    
+    # Use just the filenames (relative paths) to avoid space-parsing errors in HaploGrep
+    raw_filename = raw_for_haplogrep.name
+    haplogroups_filename = "haplogroups.txt"
+
+    try:
+        subprocess.run(
+            [
+                str(haplogrep_bin), "classify",
+                "--in", raw_filename,
+                "--out", haplogroups_filename,
+                "--tree", "phylotree-rcrs@17.2",
+            ],
+            check=True,
+            cwd=str(config.WORKDIR),
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"HaploGrep3 failed: {e}")
+        return
+
+    try:
+        subprocess.run(
+            [sys.executable, "popgen_analysis.py"],
+            check=True,
+            cwd=str(config.WORKDIR),
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"popgen_analysis.py failed: {e}")
+
+
 if __name__ == "__main__":
     main()
-
-
-
-
+    run_downstream_analysis()

@@ -1,7 +1,6 @@
 import re
 import math
 from collections import Counter
-from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -47,41 +46,23 @@ def segregating_sites(matrix):
     return S, diff_pairs, total_pairs, seg_mask
 
 
-class DisjointSet:
-    def __init__(self, n):
-        self.parent = list(range(n))
-
-    def find(self, x):
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
-        return x
-
-    def union(self, x, y):
-        rx, ry = self.find(x), self.find(y)
-        if rx != ry:
-            self.parent[rx] = ry
-
-
-def sequences_compatible(a, b):
-    informative = (a != "N") & (b != "N")
-    if not informative.any():
-        return True
-    return bool(np.all(a[informative] == b[informative]))
-
-
 def haplotype_stats(matrix, seg_mask):
-    n = matrix.shape[0]
     sub = matrix[:, seg_mask]
+    n, L = sub.shape
 
-    dsu = DisjointSet(n)
-    for i, k in combinations(range(n), 2):
-        if sequences_compatible(sub[i], sub[k]):
-            dsu.union(i, k)
+    imputed = sub.copy()
+    for col in range(L):
+        col_vals = sub[:, col]
+        non_n = col_vals[col_vals != "N"]
+        if len(non_n) == 0:
+            continue  # entire column is N — leave as-is, nothing to impute from
+        consensus = Counter(non_n.tolist()).most_common(1)[0][0]
+        imputed[col_vals == "N", col] = consensus
 
-    groups = Counter(dsu.find(i) for i in range(n))
-    H = len(groups)
-    probs = np.array([c / n for c in groups.values()])
+    haplotypes = ["".join(row) for row in imputed]
+    freqs = Counter(haplotypes)
+    H = len(freqs)
+    probs = np.array([c / n for c in freqs.values()])
     j = float(np.sum(probs ** 2))
     Hd = (n / (n - 1)) * (1 - j) if n > 1 else 0.0
     return H, Hd, j
